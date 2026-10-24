@@ -139,7 +139,12 @@ __kernel void transpose_kernel(
     __global float* Xt, __global const float* X,
     const unsigned int C, const unsigned int N
 ) {
-
+    unsigned int x = get_global_id(0);
+    unsigned int y = get_global_id(1);
+    
+    if (x<N && y<C){
+        Xt[x*C+y] = X[y*N+x];
+    }
 }
 
 
@@ -159,7 +164,12 @@ __kernel void affine_kernel(
     __global const float* gamma, __global const float* beta,
     const unsigned int C, const unsigned int N
 ) {
-
+    unsigned int x = get_global_id(0);
+    unsigned int y = get_global_id(1);
+    
+    if (x<C && y<N){
+        Y[y*C+x] = Xt[y*C+x] * gamma[x] + beta[x];
+    }
 }
 
 
@@ -178,7 +188,12 @@ __kernel void fused_kernel(
     __global const float* gamma, __global const float* beta,
     const unsigned int C, const unsigned int N
 ) {
-
+    unsigned int x = get_global_id(0);
+    unsigned int y = get_global_id(1);
+    
+    if (x<N && y<C){
+        Y[x*C+y] = X[y*N+x] * gamma[y] + beta[y];
+    }
 }
 """
 
@@ -260,7 +275,41 @@ class clModule:
         C_u, N_u = np.uint32(C), np.uint32(N)
 
         # ============ STUDENT CODE STARTS HERE ============
+        global_size = (((N-1) // self.local[0] + 1)*self.local[0], ((C-1) // self.local[1] + 1)*self.local[1])
 
+        start_time = time.time()
+        mf = cl.mem_flags
+
+        Xt = np.empty((N, C), dtype=np.float32)
+        X_buffer = cl.Buffer(self.ctx, mf.READ_ONLY | mf.COPY_HOST_PTR, hostbuf=X)
+        Xt_buffer = cl.Buffer(self.ctx, mf.WRITE_ONLY, Xt.nbytes)
+        gamma_buffer = cl.Buffer(self.ctx, mf.READ_ONLY | mf.COPY_HOST_PTR, hostbuf=gamma)
+        beta_buffer = cl.Buffer(self.ctx, mf.READ_ONLY | mf.COPY_HOST_PTR, hostbuf=beta)
+
+        evt = self.prg.transpose_kernel(self.queue, global_size, self.local, Xt_buffer, X_buffer, C_u, N_u)
+        evt.wait()
+
+        kernel1_time = (evt.profile.end - evt.profile.start) * 1e-9
+
+        cl.enqueue_copy(self.queue, Xt, Xt_buffer)
+        X_buffer.release(), Xt_buffer.release()
+
+        global_size = (((C-1) // self.local[0] + 1)*self.local[0], ((N-1) // self.local[1] + 1)*self.local[1])
+
+        Y = np.empty((N, C), dtype=np.float32)
+        Y_buffer = cl.Buffer(self.ctx, mf.WRITE_ONLY, Y.nbytes)
+        Xt_buffer = cl.Buffer(self.ctx, mf.READ_ONLY | mf.COPY_HOST_PTR, hostbuf=Xt)
+
+        evt = self.prg.affine_kernel(self.queue, global_size, self.local, Y_buffer, Xt_buffer, gamma_buffer, beta_buffer, C_u, N_u)
+        evt.wait()
+
+        kernel2_time = (evt.profile.end - evt.profile.start) * 1e-9
+        Xt_buffer.release()
+
+        cl.enqueue_copy(self.queue, Y, Y_buffer)
+
+        total_time = time.time() - start_time
+        kernel_time = kernel1_time + kernel2_time
         # ============= STUDENT CODE ENDS HERE =============
 
         return Y, kernel_time, total_time
@@ -318,7 +367,39 @@ class clModule:
         C_u, N_u = np.uint32(C), np.uint32(N)
 
         # ============ STUDENT CODE STARTS HERE ============
+        global_size = (((N-1) // self.local[0] + 1)*self.local[0], ((C-1) // self.local[1] + 1)*self.local[1])
 
+        start_time = time.time()
+        mf = cl.mem_flags
+
+        X_buffer = cl.Buffer(self.ctx, mf.READ_ONLY | mf.COPY_HOST_PTR, hostbuf=X)
+        gamma_buffer = cl.Buffer(self.ctx, mf.READ_ONLY | mf.COPY_HOST_PTR, hostbuf=gamma)
+        beta_buffer = cl.Buffer(self.ctx, mf.READ_ONLY | mf.COPY_HOST_PTR, hostbuf=beta)
+
+        Xt_buffer = cl.Buffer(self.ctx, mf.READ_WRITE, X.nbytes)
+
+        evt = self.prg.transpose_kernel(self.queue, global_size, self.local, Xt_buffer, X_buffer, C_u, N_u)
+        evt.wait()
+
+        kernel1_time = (evt.profile.end - evt.profile.start) * 1e-9
+        X_buffer.release()
+
+        global_size = (((C-1) // self.local[0] + 1)*self.local[0], ((N-1) // self.local[1] + 1)*self.local[1])
+
+        Y = np.empty((N, C), dtype=np.float32)
+        Y_buffer = cl.Buffer(self.ctx, mf.WRITE_ONLY, Y.nbytes)
+
+        evt = self.prg.affine_kernel(self.queue, global_size, self.local, Y_buffer, Xt_buffer, gamma_buffer,
+                                     beta_buffer, C_u, N_u)
+        evt.wait()
+
+        kernel2_time = (evt.profile.end - evt.profile.start) * 1e-9
+        Xt_buffer.release()
+
+        cl.enqueue_copy(self.queue, Y, Y_buffer)
+
+        total_time = time.time() - start_time
+        kernel_time = kernel1_time + kernel2_time
         # ============= STUDENT CODE ENDS HERE =============
 
         return Y, kernel_time, total_time
@@ -365,7 +446,28 @@ class clModule:
         C_u, N_u = np.uint32(C), np.uint32(N)
 
         # ============ STUDENT CODE STARTS HERE ============
+        global_size = (((N-1) // self.local[0] + 1)*self.local[0], ((C-1) // self.local[1] + 1)*self.local[1])
 
+        start_time = time.time()
+        mf = cl.mem_flags
+
+        X_buffer = cl.Buffer(self.ctx, mf.READ_ONLY | mf.COPY_HOST_PTR, hostbuf=X)
+        gamma_buffer = cl.Buffer(self.ctx, mf.READ_ONLY | mf.COPY_HOST_PTR, hostbuf=gamma)
+        beta_buffer = cl.Buffer(self.ctx, mf.READ_ONLY | mf.COPY_HOST_PTR, hostbuf=beta)
+
+        Y = np.empty((N, C), dtype=np.float32)
+        Y_buffer = cl.Buffer(self.ctx, mf.WRITE_ONLY, Y.nbytes)
+
+        evt = self.prg.fused_kernel(self.queue, global_size, self.local, Y_buffer, X_buffer, gamma_buffer,
+                                     beta_buffer, C_u, N_u)
+        evt.wait()
+
+        kernel_time = (evt.profile.end - evt.profile.start) * 1e-9
+        X_buffer.release()
+
+        cl.enqueue_copy(self.queue, Y, Y_buffer)
+
+        total_time = time.time() - start_time
         # ============= STUDENT CODE ENDS HERE =============
 
         return Y, kernel_time, total_time

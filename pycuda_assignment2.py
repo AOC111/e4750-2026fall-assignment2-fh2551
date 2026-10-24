@@ -134,7 +134,12 @@ __global__ void transpose_kernel(
     float* Xt, const float* X,
     const unsigned int C, const unsigned int N
 ) {
-
+    int x = blockIdx.x * 32 + threadIdx.x;
+    int y = blockIdx.y * 32 + threadIdx.y;
+    
+    if (x<N && y<C){
+        Xt[x*C+y] = X[y*N+x];
+    }
 }
 
 
@@ -154,7 +159,12 @@ __global__ void affine_kernel(
     const float* gamma, const float* beta,
     const unsigned int C, const unsigned int N
 ) {
-
+    int x = blockIdx.x * 32 + threadIdx.x;
+    int y = blockIdx.y * 32 + threadIdx.y;
+    
+    if (x<C && y<N){
+        Y[y*C+x] = Xt[y*C+x] * gamma[x] + beta[x];
+    }
 }
 
 
@@ -172,7 +182,12 @@ __global__ void fused_kernel(
     const float* gamma, const float* beta,
     const unsigned int C, const unsigned int N
 ) {
-
+    int x = blockIdx.x * 32 + threadIdx.x;
+    int y = blockIdx.y * 32 + threadIdx.y;
+    
+    if (x<N && y<C){
+        Y[x*C+y] = X[y*N+x] * gamma[y] + beta[y];
+    }
 }
 """
 
@@ -239,7 +254,52 @@ class cudaModule:
         C_u, N_u = np.uint32(C), np.uint32(N)
 
         # ============ STUDENT CODE STARTS HERE ============
+        # Create four event objects to count time
+        [total_start, total_end, kernel1_start, kernel1_end, kernel2_start, kernel2_end] = [cuda.Event() for _ in range(6)]
 
+        transpose = self.mod.get_function("transpose_kernel")
+        affine = self.mod.get_function("affine_kernel")
+
+        grid_size = ((N-1) // self.block[0]+1, (C-1) // self.block[1]+1, 1)
+
+        total_start.record()
+
+        Xt = np.empty((N, C), dtype=np.float32)
+        X_gpu = cuda.mem_alloc(X.nbytes)
+        Xt_gpu = cuda.mem_alloc(Xt.nbytes)
+        gamma_gpu = cuda.mem_alloc(gamma.nbytes)
+        beta_gpu = cuda.mem_alloc(beta.nbytes)
+        cuda.memcpy_htod(X_gpu, X)
+        cuda.memcpy_htod(gamma_gpu, gamma)
+        cuda.memcpy_htod(beta_gpu, beta)
+
+        kernel1_start.record()
+        transpose(Xt_gpu, X_gpu, C_u, N_u, block=self.block, grid=grid_size)
+        kernel1_end.record()
+
+        cuda.memcpy_dtoh(Xt, Xt_gpu)
+        X_gpu.free(), Xt_gpu.free()
+
+        grid_size = ((C-1) // self.block[1] + 1, (N-1) // self.block[0] + 1, 1)
+
+        Y = np.empty((N, C), dtype=np.float32)
+        Y_gpu = cuda.mem_alloc(Y.nbytes)
+        Xt_gpu = cuda.mem_alloc(Xt.nbytes)
+        cuda.memcpy_htod(Xt_gpu, Xt)
+
+
+        kernel2_start.record()
+        affine(Y_gpu, Xt_gpu, gamma_gpu, beta_gpu, C_u, N_u, block=self.block, grid=grid_size)
+        kernel2_end.record()
+        Xt_gpu.free()
+
+        cuda.memcpy_dtoh(Y, Y_gpu)
+
+        total_end.record()
+        total_end.synchronize()
+
+        total_time = total_end.time_since(total_start) * 1e-3
+        kernel_time = (kernel1_end.time_since(kernel1_start) + kernel2_end.time_since(kernel2_start)) * 1e-3
         # ============= STUDENT CODE ENDS HERE =============
 
         return Y, kernel_time, total_time
@@ -293,7 +353,45 @@ class cudaModule:
         C_u, N_u = np.uint32(C), np.uint32(N)
 
         # ============ STUDENT CODE STARTS HERE ============
+        [total_start, total_end, kernel1_start, kernel1_end, kernel2_start, kernel2_end] = [cuda.Event() for _ in range(6)]
 
+        transpose = self.mod.get_function("transpose_kernel")
+        affine = self.mod.get_function("affine_kernel")
+
+        grid_size = ((N-1) // self.block[0]+1, (C-1) // self.block[1]+1, 1)
+
+        total_start.record()
+
+        Xt = np.empty((N, C), dtype=np.float32)
+        X_gpu = cuda.mem_alloc(X.nbytes)
+        Xt_gpu = cuda.mem_alloc(Xt.nbytes)
+        gamma_gpu = cuda.mem_alloc(gamma.nbytes)
+        beta_gpu = cuda.mem_alloc(beta.nbytes)
+        cuda.memcpy_htod(X_gpu, X)
+        cuda.memcpy_htod(gamma_gpu, gamma)
+        cuda.memcpy_htod(beta_gpu, beta)
+
+        Y = np.empty((N, C), dtype=np.float32)
+        Y_gpu = cuda.mem_alloc(Y.nbytes)
+
+        kernel1_start.record()
+        transpose(Xt_gpu, X_gpu, C_u, N_u, block=self.block, grid=grid_size)
+        kernel1_end.record()
+
+        grid_size = ((C-1) // self.block[1] + 1, (N-1) // self.block[0] + 1, 1)
+
+        kernel2_start.record()
+        affine(Y_gpu, Xt_gpu, gamma_gpu, beta_gpu, C_u, N_u, block=self.block, grid=grid_size)
+        kernel2_end.record()
+        X_gpu.free(),Xt_gpu.free()
+
+        cuda.memcpy_dtoh(Y, Y_gpu)
+
+        total_end.record()
+        total_end.synchronize()
+
+        total_time = total_end.time_since(total_start) * 1e-3
+        kernel_time = (kernel1_end.time_since(kernel1_start) + kernel2_end.time_since(kernel2_start)) * 1e-3
         # ============= STUDENT CODE ENDS HERE =============
 
         return Y, kernel_time, total_time
@@ -338,7 +436,34 @@ class cudaModule:
         C_u, N_u = np.uint32(C), np.uint32(N)
 
         # ============ STUDENT CODE STARTS HERE ============
+        [total_start, total_end, kernel_start, kernel_end] = [cuda.Event() for _ in range(4)]
 
+        fused = self.mod.get_function("fused_kernel")
+
+        grid_size = ((N-1) // self.block[0]+1, (C-1) // self.block[1]+1, 1)
+
+        total_start.record()
+
+        Y = np.empty((N, C), dtype=np.float32)
+        X_gpu = cuda.mem_alloc(X.nbytes)
+        Y_gpu = cuda.mem_alloc(Y.nbytes)
+        gamma_gpu = cuda.mem_alloc(gamma.nbytes)
+        beta_gpu = cuda.mem_alloc(beta.nbytes)
+        cuda.memcpy_htod(X_gpu, X)
+        cuda.memcpy_htod(gamma_gpu, gamma)
+        cuda.memcpy_htod(beta_gpu, beta)
+
+        kernel_start.record()
+        fused(Y_gpu, X_gpu, gamma_gpu, beta_gpu, C_u, N_u, block=self.block, grid=grid_size)
+        kernel_end.record()
+
+        cuda.memcpy_dtoh(Y, Y_gpu)
+
+        total_end.record()
+        total_end.synchronize()
+
+        total_time = total_end.time_since(total_start) * 1e-3
+        kernel_time = kernel_end.time_since(kernel_start) * 1e-3
         # ============= STUDENT CODE ENDS HERE =============
 
         return Y, kernel_time, total_time
