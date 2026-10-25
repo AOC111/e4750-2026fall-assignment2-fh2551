@@ -138,6 +138,7 @@ __global__ void transpose_kernel(
     int y = blockIdx.y * 32 + threadIdx.y;
     
     if (x<N && y<C){
+        // Adjacent lanes read consecutive n values, while output rows are C elements apart.
         Xt[x*C+y] = X[y*N+x];
     }
 }
@@ -163,6 +164,7 @@ __global__ void affine_kernel(
     int y = blockIdx.y * 32 + threadIdx.y;
     
     if (x<C && y<N){
+        // Mapping x to c keeps both Xt reads and Y writes contiguous across a warp.
         Y[y*C+x] = Xt[y*C+x] * gamma[x] + beta[x];
     }
 }
@@ -186,6 +188,7 @@ __global__ void fused_kernel(
     int y = blockIdx.y * 32 + threadIdx.y;
     
     if (x<N && y<C){
+        // The two strides preserve contiguous X reads while writing Y without an Xt buffer.
         Y[x*C+y] = X[y*N+x] * gamma[y] + beta[y];
     }
 }
@@ -254,7 +257,7 @@ class cudaModule:
         C_u, N_u = np.uint32(C), np.uint32(N)
 
         # ============ STUDENT CODE STARTS HERE ============
-        # Create four event objects to count time
+        # Use separate event pairs so the host round trip contributes to total time but not kernel time.
         [total_start, total_end, kernel1_start, kernel1_end, kernel2_start, kernel2_end] = [cuda.Event() for _ in range(6)]
 
         transpose = self.mod.get_function("transpose_kernel")
@@ -284,6 +287,7 @@ class cudaModule:
 
         Y = np.empty((N, C), dtype=np.float32)
         Y_gpu = cuda.mem_alloc(Y.nbytes)
+        # Reallocate Xt so affine reads a new buffer filled by the host round trip.
         Xt_gpu = cuda.mem_alloc(Xt.nbytes)
         cuda.memcpy_htod(Xt_gpu, Xt)
 
@@ -299,6 +303,7 @@ class cudaModule:
         total_end.synchronize()
 
         total_time = total_end.time_since(total_start) * 1e-3
+        # Sum the separately bracketed kernels so intermediate copies stay out of kernel_time.
         kernel_time = (kernel1_end.time_since(kernel1_start) + kernel2_end.time_since(kernel2_start)) * 1e-3
         # ============= STUDENT CODE ENDS HERE =============
 
@@ -364,6 +369,7 @@ class cudaModule:
 
         Xt = np.empty((N, C), dtype=np.float32)
         X_gpu = cuda.mem_alloc(X.nbytes)
+        # Keep Xt device-resident to isolate intermediate global-memory traffic from host transfers.
         Xt_gpu = cuda.mem_alloc(Xt.nbytes)
         gamma_gpu = cuda.mem_alloc(gamma.nbytes)
         beta_gpu = cuda.mem_alloc(beta.nbytes)
@@ -378,6 +384,7 @@ class cudaModule:
         transpose(Xt_gpu, X_gpu, C_u, N_u, block=self.block, grid=grid_size)
         kernel1_end.record()
 
+        # The affine pass maps x to c, making neighboring lanes access adjacent Xt and Y values.
         grid_size = ((C-1) // self.block[1] + 1, (N-1) // self.block[0] + 1, 1)
 
         kernel2_start.record()
@@ -454,6 +461,7 @@ class cudaModule:
         cuda.memcpy_htod(beta_gpu, beta)
 
         kernel_start.record()
+        # This launch writes Y directly from X, avoiding both Xt and a second kernel launch.
         fused(Y_gpu, X_gpu, gamma_gpu, beta_gpu, C_u, N_u, block=self.block, grid=grid_size)
         kernel_end.record()
 

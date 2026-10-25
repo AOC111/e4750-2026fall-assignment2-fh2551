@@ -143,6 +143,7 @@ __kernel void transpose_kernel(
     unsigned int y = get_global_id(1);
     
     if (x<N && y<C){
+        // Adjacent work-items read consecutive n values, while output rows are C elements apart.
         Xt[x*C+y] = X[y*N+x];
     }
 }
@@ -168,6 +169,7 @@ __kernel void affine_kernel(
     unsigned int y = get_global_id(1);
     
     if (x<C && y<N){
+        // Mapping x to c keeps both Xt reads and Y writes contiguous across a work group.
         Y[y*C+x] = Xt[y*C+x] * gamma[x] + beta[x];
     }
 }
@@ -192,6 +194,7 @@ __kernel void fused_kernel(
     unsigned int y = get_global_id(1);
     
     if (x<N && y<C){
+        // The two strides preserve contiguous X reads while writing Y without an Xt buffer.
         Y[x*C+y] = X[y*N+x] * gamma[y] + beta[y];
     }
 }
@@ -275,6 +278,7 @@ class clModule:
         C_u, N_u = np.uint32(C), np.uint32(N)
 
         # ============ STUDENT CODE STARTS HERE ============
+        # Round up each global dimension because OpenCL requires full 32-by-32 work groups.
         global_size = (((N-1) // self.local[0] + 1)*self.local[0], ((C-1) // self.local[1] + 1)*self.local[1])
 
         start_time = time.time()
@@ -298,6 +302,7 @@ class clModule:
 
         Y = np.empty((N, C), dtype=np.float32)
         Y_buffer = cl.Buffer(self.ctx, mf.WRITE_ONLY, Y.nbytes)
+        # Recreate Xt from host memory so the extra round trip is included in total time.
         Xt_buffer = cl.Buffer(self.ctx, mf.READ_ONLY | mf.COPY_HOST_PTR, hostbuf=Xt)
 
         evt = self.prg.affine_kernel(self.queue, global_size, self.local, Y_buffer, Xt_buffer, gamma_buffer, beta_buffer, C_u, N_u)
@@ -308,6 +313,7 @@ class clModule:
 
         cl.enqueue_copy(self.queue, Y, Y_buffer)
 
+        # Event intervals isolate device kernels; wall-clock time also captures buffer setup and copies.
         total_time = time.time() - start_time
         kernel_time = kernel1_time + kernel2_time
         # ============= STUDENT CODE ENDS HERE =============
@@ -376,6 +382,7 @@ class clModule:
         gamma_buffer = cl.Buffer(self.ctx, mf.READ_ONLY | mf.COPY_HOST_PTR, hostbuf=gamma)
         beta_buffer = cl.Buffer(self.ctx, mf.READ_ONLY | mf.COPY_HOST_PTR, hostbuf=beta)
 
+        # Give Xt device-only storage so this path adds no intermediate host transfer.
         Xt_buffer = cl.Buffer(self.ctx, mf.READ_WRITE, X.nbytes)
 
         evt = self.prg.transpose_kernel(self.queue, global_size, self.local, Xt_buffer, X_buffer, C_u, N_u)
@@ -384,6 +391,7 @@ class clModule:
         kernel1_time = (evt.profile.end - evt.profile.start) * 1e-9
         X_buffer.release()
 
+        # Switch x from n to c for contiguous accesses in the affine pass.
         global_size = (((C-1) // self.local[0] + 1)*self.local[0], ((N-1) // self.local[1] + 1)*self.local[1])
 
         Y = np.empty((N, C), dtype=np.float32)
@@ -458,6 +466,7 @@ class clModule:
         Y = np.empty((N, C), dtype=np.float32)
         Y_buffer = cl.Buffer(self.ctx, mf.WRITE_ONLY, Y.nbytes)
 
+        # One launch writes Y directly from X, avoiding an Xt buffer and second kernel.
         evt = self.prg.fused_kernel(self.queue, global_size, self.local, Y_buffer, X_buffer, gamma_buffer,
                                      beta_buffer, C_u, N_u)
         evt.wait()
